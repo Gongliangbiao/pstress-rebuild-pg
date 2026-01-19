@@ -41,12 +41,12 @@ function parse_args() {
           ;;
         --resume-dir)
           RESUME_DIR=$value
-	  RESUME_MODE=1
+          RESUME_MODE=1
           ;;
-	--repeat)
-	  REPEAT=$value
-	  REPEAT_MODE=1
-	  ;;
+        --repeat)
+          REPEAT=$value
+          REPEAT_MODE=1
+          ;;
         --step)
           STEP=$value
           ;;
@@ -121,12 +121,12 @@ function start_server() {
 
 # Start the PXC server
 function start_pxc_server() {
-  ${BASEDIR}/bin/mysqld --defaults-file=${CONFIG1} $STARTUP_OPTION $MYEXTRA $PXC_MYEXTRA --wsrep-new-cluster > ${ERR_FILE1} 2>&1 &
-  pxc_startup_status 1
-  ${BASEDIR}/bin/mysqld --defaults-file=${CONFIG2} $STARTUP_OPTION $MYEXTRA $PXC_MYEXTRA > ${ERR_FILE2} 2>&1 &
-  pxc_startup_status 2
-  ${BASEDIR}/bin/mysqld --defaults-file=${CONFIG3} $STARTUP_OPTION $MYEXTRA $PXC_MYEXTRA > ${ERR_FILE3} 2>&1 &
-  pxc_startup_status 3
+  ${BASEDIR}/bin/mysqld --defaults-file=${CONFIG1} $STARTUP_OPTION $MYEXTRA --wsrep-new-cluster > ${ERR_FILE1} 2>&1 &
+  pxc_startup_status ${SOCKET1} ${ERR_FILE1}
+  ${BASEDIR}/bin/mysqld --defaults-file=${CONFIG2} $STARTUP_OPTION $MYEXTRA > ${ERR_FILE2} 2>&1 &
+  pxc_startup_status ${SOCKET2} ${ERR_FILE2}
+  ${BASEDIR}/bin/mysqld --defaults-file=${CONFIG3} $STARTUP_OPTION $MYEXTRA > ${ERR_FILE3} 2>&1 &
+  pxc_startup_status ${SOCKET3} ${ERR_FILE3}
 
   echoit "Checking 3 node PXC Cluster startup..."
   for X in $(seq 0 10); do
@@ -152,173 +152,111 @@ function start_pxc_server() {
   done
 }
 
-# Repeat a particular step
-function repeat_step() {
-  TRIAL=${STEP}
+# Repeat or resume step
+function pstress_step() {
+  if [ $REPEAT_MODE -eq 1 ]; then
+    PREV_TRIAL=$[ ${STEP} - 1 ]
+    TRIAL=$STEP
+    TRIAL_DIR=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT
+  else
+    PREV_TRIAL=$TRIAL
+    TRIAL=$[ ${TRIAL} + 1 ]
+    TRIAL_DIR=${RESUME_INCIDENT_DIR}/${TRIAL}
+  fi
+  PREV_TRIAL_DIR=${RESUME_INCIDENT_DIR}/${PREV_TRIAL}
+
   echoit "====== TRIAL #${TRIAL} ($COUNT) ======"
   echoit "Ensuring there are no relevant mysqld server running..."
   KILLPID=$(ps -ef | grep mysqld | grep -v grep | awk '{print $2}' | tr '\n' ' ')
   { kill -9 $KILLPID && wait $KILLPID; } 2>/dev/null
   if [ ${PXC} -eq 0 ]; then
-    mkdir -p ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/log
-    mkdir ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/data ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/tmp
-    echoit "Copying datadir from incident directory ${INCIDENT_DIR}/${TRIAL}/data into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT";
-    rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/data/ ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/data 2>&1
+    mkdir -p ${TRIAL_DIR}/data ${TRIAL_DIR}/tmp ${TRIAL_DIR}/log
+    echoit "Copying datadir from previous trial ${PREV_TRIAL_DIR}/data into ${TRIAL_DIR}/data";
+    rsync -ar --exclude='*core*' ${PREV_TRIAL_DIR}/data/ ${TRIAL_DIR}/data 2>&1
+    if [ ${ENCRYPTION_RUN} -eq 1 -a ${COMPONENT_KEYRING_FILE} -eq 1 ]; then
+      sed -i "s|$RUNDIR/$(($TRIAL-1))|$TRIAL_DIR|g" ${TRIAL_DIR}/data/component_keyring_file.cnf
+    fi
   elif [ ${PXC} -eq 1 ]; then
-    mkdir -p ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/tmp1 ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/tmp2 ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/tmp3
-    mkdir ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node1 ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node2 ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node3
-    echoit "Copying datadir from incident directory ${INCIDENT_DIR}/${TRIAL}/node1 into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT";
-    echoit "Copying datadir from incident directory ${INCIDENT_DIR}/${TRIAL}/node2 into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT";
-    echoit "Copying datadir from incident directory ${INCIDENT_DIR}/${TRIAL}/node3 into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT";
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/${TRIAL}/node1/ ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node1 2>&1
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/${TRIAL}/node2/ ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node2 2>&1
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/${TRIAL}/node3/ ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node3 2>&1
-    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n1.cnf into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n1.cnf"
-    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n2.cnf into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n2.cnf"
-    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n3.cnf into ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n3.cnf"
-    cp ${INCIDENT_DIR}/${TRIAL}/n1.cnf ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n1.cnf
-    cp ${INCIDENT_DIR}/${TRIAL}/n2.cnf ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n2.cnf
-    cp ${INCIDENT_DIR}/${TRIAL}/n3.cnf ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n3.cnf
+    mkdir -p ${TRIAL_DIR}/tmp1 ${TRIAL_DIR}/tmp2 ${TRIAL_DIR}/tmp3
+    mkdir ${TRIAL_DIR}/node1 ${TRIAL_DIR}/node2 ${TRIAL_DIR}/node3
+    echoit "Copying datadir from ${PREV_TRIAL_DIR}/node1 into ${TRIAL_DIR}/node1";
+    echoit "Copying datadir from ${PREV_TRIAL_DIR}/node2 into ${TRIAL_DIR}/node2";
+    echoit "Copying datadir from ${PREV_TRIAL_DIR}/node3 into ${TRIAL_DIR}/node3";
+    rsync -ar --exclude='*core*' ${PREV_TRIAL_DIR}/node1/ ${TRIAL_DIR}/node1 2>&1
+    rsync -ar --exclude='*core*' ${PREV_TRIAL_DIR}/node2/ ${TRIAL_DIR}/node2 2>&1
+    rsync -ar --exclude='*core*' ${PREV_TRIAL_DIR}/node3/ ${TRIAL_DIR}/node3 2>&1
+    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n1.cnf into ${TRIAL_DIR}/n1.cnf"
+    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n2.cnf into ${TRIAL_DIR}/n2.cnf"
+    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n3.cnf into ${TRIAL_DIR}/n3.cnf"
+    cp ${INCIDENT_DIR}/${TRIAL}/n1.cnf ${TRIAL_DIR}/n1.cnf
+    cp ${INCIDENT_DIR}/${TRIAL}/n2.cnf ${TRIAL_DIR}/n2.cnf
+    cp ${INCIDENT_DIR}/${TRIAL}/n3.cnf ${TRIAL_DIR}/n3.cnf
 
-    sed -i "s|$RUNDIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL.$COUNT|g" ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n1.cnf
-    sed -i "s|$RUNDIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL.$COUNT|g" ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n2.cnf
-    sed -i "s|$RUNDIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL.$COUNT|g" ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n3.cnf
+    sed -i "s|$RUNDIR/$TRIAL|$TRIAL_DIR|g" ${TRIAL_DIR}/n1.cnf
+    sed -i "s|$RUNDIR/$TRIAL|$TRIAL_DIR|g" ${TRIAL_DIR}/n2.cnf
+    sed -i "s|$RUNDIR/$TRIAL|$TRIAL_DIR|g" ${TRIAL_DIR}/n3.cnf
 
-    sed -i "s|$INCIDENT_DIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL.$COUNT|g" ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n1.cnf
-    sed -i "s|$INCIDENT_DIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL.$COUNT|g" ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n2.cnf
-    sed -i "s|$INCIDENT_DIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL.$COUNT|g" ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n3.cnf
+    sed -i "s|$INCIDENT_DIR/$TRIAL|$TRIAL_DIR|g" ${TRIAL_DIR}/n1.cnf
+    sed -i "s|$INCIDENT_DIR/$TRIAL|$TRIAL_DIR|g" ${TRIAL_DIR}/n2.cnf
+    sed -i "s|$INCIDENT_DIR/$TRIAL|$TRIAL_DIR|g" ${TRIAL_DIR}/n3.cnf
 
-    sed -i 's|safe_to_bootstrap:.*$|safe_to_bootstrap: 1|' ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node1/grastate.dat
+    sed -i 's|safe_to_bootstrap:.*$|safe_to_bootstrap: 1|' ${TRIAL_DIR}/node1/grastate.dat
+
+    if [ ${ENCRYPTION_RUN} -eq 1 -a ${COMPONENT_KEYRING_FILE} -eq 1 ]; then
+      sed -i "s|$RUNDIR/${PREV_TRIAL}|$TRIAL_DIR|g" ${TRIAL_DIR}/node1/component_keyring_file.cnf
+      sed -i "s|$RUNDIR/${PREV_TRIAL}|$TRIAL_DIR|g" ${TRIAL_DIR}/node2/component_keyring_file.cnf
+      sed -i "s|$RUNDIR/${PREV_TRIAL}|$TRIAL_DIR|g" ${TRIAL_DIR}/node3/component_keyring_file.cnf
+    fi
   fi
 
 # Start server
   if [ ${PXC} -eq 0 ]; then
-    SOCKET=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/socket.sock
-    DATADIR=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/data
-    TEMPDIR=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/tmp
-    ERROR=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/log/master.err
-    PID_FILE=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/pid.pid
+    SOCKET=${TRIAL_DIR}/socket.sock
+    DATADIR=${TRIAL_DIR}/data
+    TEMPDIR=${TRIAL_DIR}/tmp
+    ERROR=${TRIAL_DIR}/log/master.err
+    PID_FILE=${TRIAL_DIR}/pid.pid
     start_server
   elif [ $PXC -eq 1 ]; then
-    SOCKET1=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node1/node1_socket.sock
-    SOCKET2=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node2/node2_socket.sock
-    SOCKET3=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node3/node3_socket.sock
-    CONFIG1=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n1.cnf
-    CONFIG2=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n2.cnf
-    CONFIG3=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/n3.cnf
-    ERR_FILE1=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node1/node1.err
-    ERR_FILE2=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node2/node2.err
-    ERR_FILE3=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node3/node3.err
+    SOCKET1=${TRIAL_DIR}/node1/node1_socket.sock
+    SOCKET2=${TRIAL_DIR}/node2/node2_socket.sock
+    SOCKET3=${TRIAL_DIR}/node3/node3_socket.sock
+    CONFIG1=${TRIAL_DIR}/n1.cnf
+    CONFIG2=${TRIAL_DIR}/n2.cnf
+    CONFIG3=${TRIAL_DIR}/n3.cnf
+    ERR_FILE1=${TRIAL_DIR}/node1/node1.err
+    ERR_FILE2=${TRIAL_DIR}/node2/node2.err
+    ERR_FILE3=${TRIAL_DIR}/node3/node3.err
     start_pxc_server
   fi
 
 # Start pstress
-  LOGDIR=${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/
+  LOGDIR=${TRIAL_DIR}
   METADATA_PATH=${RESUME_INCIDENT_DIR}
   start_pstress
 
 # Terminate mysqld
   kill_server $SIGNAL
   sleep 5 #^ Ensure the mysqld is gone completely
-  if [ $(ls -l ${RESUME_INCIDENT_DIR}/${TRIAL}/*/*core* 2>/dev/null | wc -l) -ge 1 ]; then
-    echoit "mysqld coredump detected at $(ls ${RESUME_INCIDENT_DIR}/${TRIAL}/*/*core* 2>/dev/null)"
-    echoit "Bug found (as per error log): $(${SCRIPT_PWD}/search_string.sh ${RESUME_INCIDENT_DIR}/${TRIAL}/log/master.err)"
+  if [ $(ls -l ${TRIAL_DIR}/*/*core* 2>/dev/null | wc -l) -ge 1 ]; then
+    echoit "mysqld coredump detected at $(ls ${TRIAL_DIR}/*/*core* 2>/dev/null)"
+    echoit "Bug found (as per error log): $(${SCRIPT_PWD}/search_string.sh ${TRIAL_DIR}/log/master.err)"
   fi
 
-  echoit "pstress run details:$(grep -i 'SUMMARY.*queries failed' ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/*.sql ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/*.log | sed 's|.*:||')"
+  echoit "pstress run details:$(grep -i 'SUMMARY.*queries failed' ${TRIAL_DIR}/*.sql ${TRIAL_DIR}/*.log | sed 's|.*:||')"
 
-}
-
-function resume_pstress() {
-  TRIAL=$[ ${TRIAL} + 1 ]
-  echoit "====== TRIAL #${TRIAL} ======"
-  echoit "Ensuring there are no relevant mysqld server running"
-  KILLPID=$(ps -ef | grep mysqld | grep -v grep | awk '{print $2}' | tr '\n' ' ')
-  { kill -9 $KILLPID && wait $KILLPID; } 2>/dev/null
-  if [ $PXC -eq 0 ]; then
-    mkdir -p ${RESUME_INCIDENT_DIR}/${TRIAL}/data ${RESUME_INCIDENT_DIR}/${TRIAL}/tmp ${RESUME_INCIDENT_DIR}/${TRIAL}/log
-    echoit "Copying datadir from previous trial ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/data into ${RESUME_INCIDENT_DIR}/${TRIAL}/data";
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/$(($TRIAL-1))/data/ ${RESUME_INCIDENT_DIR}/${TRIAL}/data 2>&1
-    if [ ${ENCRYPTION_RUN} -eq 1 -a ${COMPONENT_KEYRING_FILE} -eq 1 ]; then
-      sed -i "s|$RUNDIR/$(($TRIAL-1))|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/data/component_keyring_file.cnf
-    fi
-  elif [ $PXC -eq 1 ]; then
-    mkdir -p ${RESUME_INCIDENT_DIR}/${TRIAL}/tmp1 ${RESUME_INCIDENT_DIR}/${TRIAL}/tmp2 ${RESUME_INCIDENT_DIR}/${TRIAL}/tmp3
-    mkdir ${RESUME_INCIDENT_DIR}/${TRIAL}/node1 ${RESUME_INCIDENT_DIR}/${TRIAL}/node2 ${RESUME_INCIDENT_DIR}/${TRIAL}/node3
-    echoit "Copying datadir from ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/node1 into ${RESUME_INCIDENT_DIR}/${TRIAL}/node1";
-    echoit "Copying datadir from ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/node2 into ${RESUME_INCIDENT_DIR}/${TRIAL}/node2";
-    echoit "Copying datadir from ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/node3 into ${RESUME_INCIDENT_DIR}/${TRIAL}/node3";
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/node1/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node1 2>&1
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/node2/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node2 2>&1
-    rsync -ar --exclude='*core*' ${RESUME_INCIDENT_DIR}/$((${TRIAL}-1))/node3/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node3 2>&1
-    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n1.cnf into ${RESUME_INCIDENT_DIR}/${TRIAL}/n1.cnf"
-    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n2.cnf into ${RESUME_INCIDENT_DIR}/${TRIAL}/n2.cnf"
-    echoit "Copying config file from ${INCIDENT_DIR}/${TRIAL}/n3.cnf into ${RESUME_INCIDENT_DIR}/${TRIAL}/n3.cnf"
-    cp ${INCIDENT_DIR}/${TRIAL}/n1.cnf ${RESUME_INCIDENT_DIR}/${TRIAL}/n1.cnf
-    cp ${INCIDENT_DIR}/${TRIAL}/n2.cnf ${RESUME_INCIDENT_DIR}/${TRIAL}/n2.cnf
-    cp ${INCIDENT_DIR}/${TRIAL}/n3.cnf ${RESUME_INCIDENT_DIR}/${TRIAL}/n3.cnf
-
-    sed -i "s|$RUNDIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/n1.cnf
-    sed -i "s|$RUNDIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/n2.cnf
-    sed -i "s|$RUNDIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/n3.cnf
-
-    sed -i "s|$INCIDENT_DIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/n1.cnf
-    sed -i "s|$INCIDENT_DIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/n2.cnf
-    sed -i "s|$INCIDENT_DIR/$TRIAL|$RESUME_INCIDENT_DIR/$TRIAL|g" ${RESUME_INCIDENT_DIR}/${TRIAL}/n3.cnf
-
-    sed -i 's|safe_to_bootstrap:.*$|safe_to_bootstrap: 1|' ${RESUME_INCIDENT_DIR}/${TRIAL}/node1/grastate.dat
-  fi
-
-# Start server
-  if [ $PXC -eq 0 ]; then
-    SOCKET=${RESUME_INCIDENT_DIR}/${TRIAL}/socket.sock
-    DATADIR=${RESUME_INCIDENT_DIR}/${TRIAL}/data
-    TEMPDIR=${RESUME_INCIDENT_DIR}/${TRIAL}/tmp
-    ERROR=${RESUME_INCIDENT_DIR}/${TRIAL}/log/master.err
-    PID_FILE=${RESUME_INCIDENT_DIR}/${TRIAL}/pid.pid
-    start_server
-  elif [ $PXC -eq 1 ]; then
-    SOCKET1=${RESUME_INCIDENT_DIR}/${TRIAL}/node1/node1_socket.sock
-    SOCKET2=${RESUME_INCIDENT_DIR}/${TRIAL}/node2/node2_socket.sock
-    SOCKET3=${RESUME_INCIDENT_DIR}/${TRIAL}/node3/node3_socket.sock
-    CONFIG1=${RESUME_INCIDENT_DIR}/${TRIAL}/n1.cnf
-    CONFIG2=${RESUME_INCIDENT_DIR}/${TRIAL}/n2.cnf
-    CONFIG3=${RESUME_INCIDENT_DIR}/${TRIAL}/n3.cnf
-    ERR_FILE1=${RESUME_INCIDENT_DIR}/${TRIAL}/node1/node1.err
-    ERR_FILE2=${RESUME_INCIDENT_DIR}/${TRIAL}/node2/node2.err
-    ERR_FILE3=${RESUME_INCIDENT_DIR}/${TRIAL}/node3/node3.err
-    start_pxc_server
-  fi
-
-# Start pstress
-  LOGDIR=${RESUME_INCIDENT_DIR}/${TRIAL}
-  METADATA_PATH=${RESUME_INCIDENT_DIR}
-  start_pstress
-
-# Terminate mysqld
-  kill_server $SIGNAL
-  sleep 5 #^ Ensure the mysqld is gone completely
-  if [ $(ls -l ${RESUME_INCIDENT_DIR}/${TRIAL}/*/*core* 2>/dev/null | wc -l) -ge 1 ]; then
-    echoit "mysqld coredump detected at $(ls ${RESUME_INCIDENT_DIR}/${TRIAL}/*/*core* 2>/dev/null)"
-    echoit "Bug found (as per error log): $(${SCRIPT_PWD}/search_string.sh ${RESUME_INCIDENT_DIR}/${TRIAL}/log/master.err)"
-  fi
-  echoit "pstress run details:$(grep -i 'SUMMARY.*queries failed' ${RESUME_INCIDENT_DIR}/${TRIAL}/*.sql ${RESUME_INCIDENT_DIR}/${TRIAL}/*.log | sed 's|.*:||')"
 }
 
 # Start pstress on running server
 function start_pstress() {
   echoit "Starting pstress run for step:${TRIAL} ..."
-  if [ ${PXC} -eq 0 ]; then
-    CMD="${PSTRESS_BIN} --database=test --threads=${THREADS} --queries-per-thread=${QUERIES_PER_THREAD} --logdir=${LOGDIR} --user=root --socket=$SOCKET --seed ${SEED} --step ${TRIAL} --metadata-path ${METADATA_PATH}/ --seconds ${PSTRESS_RUN_TIMEOUT} ${DYNAMIC_QUERY_PARAMETER} --engine=${ENGINE}"
-    echoit "$CMD"
-    $CMD > ${LOGDIR}/pstress.log 2>&1 &
-    PSPID="$!"
-  elif [ ${PXC} -eq 1 ]; then
-    CMD="${PSTRESS_BIN} --database=test --threads=${THREADS} --queries-per-thread=${QUERIES_PER_THREAD} --logdir=${LOGDIR} --user=root --socket=${SOCKET1} --seed ${SEED} --step ${TRIAL} --metadata-path ${METADATA_PATH}/ --seconds ${PSTRESS_RUN_TIMEOUT} ${DYNAMIC_QUERY_PARAMETER} --engine=${ENGINE}"
-    echoit "$CMD"
-    $CMD > ${LOGDIR}/pstress.log 2>&1 &
-    PSPID="$!"
+  if [ ${PXC} -eq 1 ]; then
+    SOCKET=${SOCKET1}
   fi
+  CMD="${PSTRESS_BIN} --database=test --threads=${THREADS} --queries-per-thread=${QUERIES_PER_THREAD} --logdir=${LOGDIR} --user=root --socket=$SOCKET --seed ${SEED} --step ${TRIAL} --metadata-path ${METADATA_PATH}/ --seconds ${PSTRESS_RUN_TIMEOUT} ${DYNAMIC_QUERY_PARAMETER} --engine=${ENGINE}"
+  echoit "$CMD"
+  $CMD > ${LOGDIR}/pstress.log 2>&1 &
+  PSPID="$!"
 
   echoit "pstress running (Max duration: ${PSTRESS_RUN_TIMEOUT}s)..."
   for X in $(seq 1 ${PSTRESS_RUN_TIMEOUT}); do
@@ -341,23 +279,24 @@ function start_pstress() {
 }
 
 function pxc_startup_status() {
-  NR=$1
+  SOCKET=$1
+  ERR_FILE=$2
   for X in $(seq 0 ${PXC_START_TIMEOUT}); do
     sleep 1
     if [ ${RESUME_MODE} -eq 1 ]; then
-      if ${BASEDIR}/bin/mysqladmin -uroot -S${RESUME_INCIDENT_DIR}/${TRIAL}/node$NR/node${NR}_socket.sock ping > /dev/null 2>&1; then
+      if ${BASEDIR}/bin/mysqladmin -uroot -S${SOCKET} ping > /dev/null 2>&1; then
         break
       fi
     elif [ $REPEAT_MODE -eq 1 ]; then
-      if ${BASEDIR}/bin/mysqladmin -uroot -S${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node$NR/node${NR}_socket.sock ping > /dev/null 2>&1; then
+      if ${BASEDIR}/bin/mysqladmin -uroot -S${SOCKET} ping > /dev/null 2>&1; then
         break
       fi
     fi
     if [ $X -eq ${PXC_START_TIMEOUT} ]; then
       if [ ${RESUME_MODE} -eq 1 ]; then
-        echo "Could not start the server. Check error logs: ${RESUME_INCIDENT_DIR}/${TRIAL}/node$NR/node$NR.err"
+        echo "Could not start the server. Check error logs: ${ERR_FILE}"
       else
-        echo "Could not start the server. Check error logs: ${RESUME_INCIDENT_DIR}/${TRIAL}.$COUNT/node$NR/node$NR.err"
+        echo "Could not start the server. Check error logs: ${ERR_FILE}"
       fi
       exit 1
     fi
@@ -453,6 +392,20 @@ else
   exit 1
 fi
 
+MYEXTRA_FILE=${INCIDENT_DIR}/${STEP}/MYEXTRA
+if [ -f "$MYEXTRA_FILE" ]; then
+  LINE_COUNT=$(wc -l < "$MYEXTRA_FILE" | tr -d ' ')
+  if [ "$LINE_COUNT" -ne 1 ]; then
+    echo "Error: $MYEXTRA_FILE must contain exactly one line, but it has $LINE_COUNT line(s)"
+    exit 1
+  fi
+  IFS= read -r MYEXTRA < "$MYEXTRA_FILE"
+  echo "options used for server ${MYEXTRA}"
+else
+  echo "No MYEXTRA file found. Using default options"
+  MYEXTRA=""
+fi
+
 rm -rf ${RESUME_DIR}/${RANDOMD}
 RESUME_INCIDENT_DIR=${RESUME_DIR}/${RANDOMD}
 
@@ -463,76 +416,52 @@ fi
 
 if [ ${RESUME_MODE} -eq 1 ]; then
   echo "Resuming pstress iterations from step:${STEP}"
-  TRIAL=$[ ${STEP} - 1 ]
-  if [ ${STEP} -gt 1 ]; then
-    echo "Generating new trial workdir ${RESUME_INCIDENT_DIR}/${TRIAL}"
-    mkdir -p ${RESUME_INCIDENT_DIR}/${TRIAL}
-    if [ ${PXC} -eq 0 ]; then
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/data into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/data/ ${RESUME_INCIDENT_DIR}/${TRIAL}/data 2>&1
-    elif [ ${PXC} -eq 1 ]; then
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/node1 into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/node2 into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/node3 into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/node1/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node1 2>&1
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/node2/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node2 2>&1
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/node3/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node3 2>&1
-    fi
-    echo "Copying step_${TRIAL}.dll file into ${RESUME_INCIDENT_DIR}"
-  elif [ ${STEP} -eq 1 ]; then
-    echo "If you intend to resume from step 1, execute pstress-run.sh using same seed number"
-    exit 1
-  else
-    echo "Invalid step provided. Exiting..."
-    exit 1
-  fi
+elif [ ${REPEAT_MODE} -eq 1 ]; then
+  echo "Repeating step ${STEP} (${REPEAT}) number of times"
+fi
 
+TRIAL=$[ ${STEP} - 1 ]
+if [ ${STEP} -gt 1 ]; then
+  echo "Generating new trial workdir ${RESUME_INCIDENT_DIR}/${TRIAL}"
+  mkdir -p ${RESUME_INCIDENT_DIR}/${TRIAL}
+  if [ ${PXC} -eq 0 ]; then
+    echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/data into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
+    rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/data/ ${RESUME_INCIDENT_DIR}/${TRIAL}/data 2>&1
+  elif [ ${PXC} -eq 1 ]; then
+    echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/node1 into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
+    echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/node2 into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
+    echo "Taking backup of datadir from ${INCIDENT_DIR}/${TRIAL}/node3 into ${RESUME_INCIDENT_DIR}/${TRIAL}/"
+    rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/node1/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node1 2>&1
+    rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/node2/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node2 2>&1
+    rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${TRIAL}/node3/ ${RESUME_INCIDENT_DIR}/${TRIAL}/node3 2>&1
+  fi
   if [ -f ${INCIDENT_DIR}/step_${TRIAL}.dll ]; then
+    echo "Copying step_${TRIAL}.dll file into ${RESUME_INCIDENT_DIR}"
     cp ${INCIDENT_DIR}/step_${TRIAL}.dll ${RESUME_INCIDENT_DIR}
   else
     echo "The step_${TRIAL}.dll file does not exist. Can not continue"
     exit 1
   fi
-
-  LEFT_TRIALS=$[ ${TRIALS} - ${TRIAL} ]
-  for X in $(seq 1 ${LEFT_TRIALS}); do
-    resume_pstress
-  done
-elif [ ${REPEAT_MODE} -eq 1 ]; then
-  echo "Repeating step ${STEP} (${REPEAT}) number of times"
-  mkdir -p ${RESUME_INCIDENT_DIR}/${STEP}
-  if [ ${STEP} -gt 1 ]; then
-    if [ ${PXC} -eq 0 ]; then
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${STEP}/data into ${RESUME_INCIDENT_DIR}/${STEP}/"
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${STEP}/data/ ${RESUME_INCIDENT_DIR}/${STEP}/data 2>&1
-    elif [ ${PXC} -eq 1 ]; then
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${STEP}/node1 into ${RESUME_INCIDENT_DIR}/${STEP}/"
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${STEP}/node2 into ${RESUME_INCIDENT_DIR}/${STEP}/"
-      echo "Taking backup of datadir from ${INCIDENT_DIR}/${STEP}/node3 into ${RESUME_INCIDENT_DIR}/${STEP}/"
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${STEP}/node1/ ${RESUME_INCIDENT_DIR}/${STEP}/node1 2>&1
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${STEP}/node2/ ${RESUME_INCIDENT_DIR}/${STEP}/node2 2>&1
-      rsync -ar --exclude='*core*' ${INCIDENT_DIR}/${STEP}/node3/ ${RESUME_INCIDENT_DIR}/${STEP}/node3 2>&1
-    fi
-    echo "Copying step_$((${STEP}-1)).dll file into ${RESUME_INCIDENT_DIR}"
-    cp ${INCIDENT_DIR}/step_$((${STEP}-1)).dll ${RESUME_INCIDENT_DIR}
-  elif [ ${STEP} -eq 1 ]; then
-    echo "If you intend to repeat step 1, please perform a normal run using same seed number"
-    exit 1
-  else
-    echo "Invalid step provided. Exiting..."
-    exit 1
-  fi
-
-  for COUNT in $(seq 1 ${REPEAT}); do
-    repeat_step
-  done
+elif [ ${STEP} -eq 1 ]; then
+  echo "If you intend to repeat or resume from step 1, execute pstress-run.sh or please perform a normal run using same seed number"
+  exit 1
+else
+  echo "Invalid step provided. Exiting..."
+  exit 1
 fi
+
+if [ ${RESUME_MODE} -eq 1 ]; then
+  LEFT_TRIALS=$[ ${TRIALS} - ${TRIAL} ]
+elif [ ${REPEAT_MODE} -eq 1 ]; then
+  LEFT_TRIALS=${REPEAT}
+fi
+
+for COUNT in $(seq 1 ${LEFT_TRIALS}); do
+    pstress_step
+done
+
 echoit "Done. Attempting to cleanup the pstress rundir ${RUNDIR}..."
 rm -rf ${RUNDIR}
-if [ ${RESUME_MODE} -eq 1 ]; then
-  echoit "The results of this run can be found in the resume dir ${RESUME_DIR}..."
-elif [ ${REPEAT_MODE} -eq 1 ]; then
-  echoit "The results of this run can be found in the repeat dir ${RESUME_DIR}..."
-fi
+echoit "The results of this run can be found in the repeat/resume dir ${RESUME_DIR}..."
 echoit "Done. Exiting $0 with exit code 0..."
 exit 0
