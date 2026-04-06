@@ -1023,8 +1023,14 @@ template <typename Writer> void Table::Serialize(Writer &writer) const {
     std::string parent = fk_table->parent->name_;
     std::string on_update = fk_table->enumToString(fk_table->on_update);
     std::string on_delete = fk_table->enumToString(fk_table->on_delete);
+    std::string parent_column = fk_table->parent_column_name;
+    if (parent_column.empty() && fk_table->parent_column != nullptr)
+      parent_column = fk_table->parent_column->name_;
     writer.String("parent");
     writer.String(parent.c_str(), static_cast<SizeType>(parent.length()));
+    writer.String("parent_column");
+    writer.String(parent_column.c_str(),
+                  static_cast<SizeType>(parent_column.length()));
     writer.String("on_update");
     writer.String(on_update.c_str(), static_cast<SizeType>(on_update.length()));
     writer.String("on_delete");
@@ -1177,21 +1183,128 @@ bool Table::load_secondary_indexes(Thd1 *thd) {
   return true;
 }
 
+bool Table::has_index_on_column(const Column *column) const {
+  if (column == nullptr)
+    return false;
+
+  if (column->primary_key)
+    return true;
+
+  for (const auto &index : *indexes_) {
+    for (const auto &ind_col : *index->columns_) {
+      if (ind_col->column == column)
+        return true;
+    }
+  }
+
+  return false;
+}
+
+Column *FK_table::child_fk_column() const {
+  for (const auto &column : *columns_) {
+    if (column->name_.find("fk_col") != std::string::npos)
+      return column;
+  }
+  return nullptr;
+}
+
+bool FK_table::can_use_column_for_strength_fk(const Column *column) const {
+  if (column == nullptr || column->auto_increment ||
+      !parent->has_index_on_column(column))
+    return false;
+
+  switch (column->type_) {
+  case Column::INT:
+  case Column::INTEGER:
+  case Column::CHAR:
+  case Column::VARCHAR:
+    return true;
+  default:
+    return false;
+  }
+}
+
+Column *FK_table::find_parent_reference_column() const {
+  if (parent == nullptr)
+    return nullptr;
+
+  if (!parent_column_name.empty()) {
+    for (const auto &column : *parent->columns_) {
+      if (column->name_ == parent_column_name)
+        return column;
+    }
+  }
+
+  if (!options->at(Option::STRENGTH_FK)->getBool()) {
+    for (const auto &column : *parent->columns_) {
+      if (column->primary_key)
+        return column;
+    }
+    return nullptr;
+  }
+
+  std::vector<Column *> candidates;
+  for (const auto &column : *parent->columns_) {
+    if (can_use_column_for_strength_fk(column))
+      candidates.push_back(column);
+  }
+
+  if (candidates.empty())
+    return nullptr;
+
+  return candidates.at(rand_int(candidates.size() - 1));
+}
+
+bool FK_table::configure_reference_column() {
+  parent_column = find_parent_reference_column();
+  if (parent_column == nullptr)
+    return false;
+
+  parent_column_name = parent_column->name_;
+
+  if (!options->at(Option::STRENGTH_FK)->getBool())
+    return true;
+
+  auto current_fk_column = child_fk_column();
+  if (current_fk_column == nullptr)
+    return false;
+
+  auto replacement =
+      new Column("fk_col", this, parent_column->type_);
+  replacement->length = parent_column->length;
+
+  for (const auto &index : *indexes_) {
+    for (const auto &ind_col : *index->columns_) {
+      if (ind_col->column == current_fk_column)
+        ind_col->column = replacement;
+    }
+  }
+
+  for (auto pos = columns_->begin(); pos != columns_->end(); ++pos) {
+    if (*pos == current_fk_column) {
+      delete current_fk_column;
+      *pos = replacement;
+      return true;
+    }
+  }
+
+  delete replacement;
+  return false;
+}
+
 bool FK_table::load_fk_constraint(Thd1 *thd) {
 
   std::string constraint = name_ + "_" + parent->name_;
-  std::string pk;
-  for (const auto &col : *parent->columns_) {
-    if (col->primary_key == true) {
-      pk = col->name_;
-      break;
-    }
-  }
-  assert(pk.size() > 0);
+  if (parent_column == nullptr)
+    parent_column = find_parent_reference_column();
+
+  auto fk_column = child_fk_column();
+  assert(parent_column != nullptr);
+  assert(fk_column != nullptr);
 
   std::string sql = "ALTER TABLE " + name_ + " ADD CONSTRAINT " + constraint +
-                    " FOREIGN KEY (ifk_col) REFERENCES " + parent->name_ +
-                    " (" + pk + ")";
+                    " FOREIGN KEY (" + fk_column->name_ + ") REFERENCES " +
+                    parent->name_ + " (" + parent_column->name_ + ")";
   sql += " ON UPDATE " + enumToString(on_update);
   sql += " ON DELETE  " + enumToString(on_delete);
 
@@ -1871,11 +1984,15 @@ std::string Table::definition(bool with_index) {
       }
       if (type == FK) {
         auto fk = static_cast<FK_table *>(this);
-        def += " FOREIGN KEY (ifk_col) REFERENCES " + fk->parent->name_ +
-               " (ipkey) ";
-        def += " ON UPDATE " + fk->enumToString(fk->on_update) + " ON DELETE " +
-            fk->enumToString(fk->on_delete);
-        def += ", ";
+        auto fk_column = fk->child_fk_column();
+        auto parent_column = fk->find_parent_reference_column();
+        if (fk_column != nullptr && parent_column != nullptr) {
+          def += " FOREIGN KEY (" + fk_column->name_ + ") REFERENCES " +
+                 fk->parent->name_ + " (" + parent_column->name_ + ") ";
+          def += " ON UPDATE " + fk->enumToString(fk->on_update) +
+                 " ON DELETE " + fk->enumToString(fk->on_delete);
+          def += ", ";
+        }
       }
     }
 
@@ -1990,11 +2107,13 @@ void generate_metadata_for_tables() {
 
         /* Create FK table */
         if (!options->at(Option::NO_FK)->getBool() &&
-            options->at(Option::FK_PROB)->getInt() > rand_int(100) &&
-            parent_table->has_pk()) {
-          auto child_table = Table::table_id(Table::FK, i);
-          all_tables->push_back(child_table);
-          static_cast<FK_table *>(child_table)->parent = parent_table;
+            options->at(Option::FK_PROB)->getInt() > rand_int(100)) {
+          auto child_table = static_cast<FK_table *>(Table::table_id(Table::FK, i));
+          child_table->parent = parent_table;
+          if (child_table->configure_reference_column())
+            all_tables->push_back(child_table);
+          else
+            delete child_table;
         }
       }
 
@@ -2834,6 +2953,7 @@ void Table::UpdateRandomROW(Thd1 *thd) {
 
 bool Table::InsertBulkRecord(Thd1 *thd) {
   bool is_list_partition = false;
+  auto strength_fk = options->at(Option::STRENGTH_FK)->getBool();
 
   // if parent has no records, child can't have records
   if (type == FK) {
@@ -2847,14 +2967,30 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   std::string prepare_sql = "INSERT ";
 
   std::vector<int> fk_unique_keys;
+  std::vector<std::string> fk_values;
 
   /* If a table has FK move its parent keys in fk_unique_keys */
   if (type == TABLE_TYPES::FK) {
-    fk_unique_keys = std::move(thd->unique_keys);
+    auto fk_table = static_cast<FK_table *>(this);
+    if (strength_fk) {
+      fk_values = fk_table->parent_column->inserted_values;
+      fk_table->fk_values = fk_values;
+      if (fk_values.empty()) {
+        thd->thread_log << "No cached parent FK values available for " << name_
+                        << std::endl;
+        run_query_failed = true;
+        return false;
+      }
+    } else {
+      fk_unique_keys = std::move(thd->unique_keys);
+    }
   }
   if (has_pk()) {
     thd->unique_keys = generateUniqueRandomNumbers(number_of_initial_records);
   }
+
+  for (auto &column : *columns_)
+    column->inserted_values.clear();
 
   /* ignore error in the case parition list  */
   if (type == PARTITION &&
@@ -2884,26 +3020,33 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   while (records < number_of_initial_records) {
     std::string value = "(";
     for (const auto &column : *columns_) {
+      std::string inserted_value;
       /* For FK we get the unique value from the parent table unique vector */
       if (column->name_.find("fk_col") != std::string::npos) {
-        value +=
-            std::to_string(fk_unique_keys[rand_int(fk_unique_keys.size() - 1)]);
+        if (strength_fk) {
+          inserted_value = fk_values.at(rand_int(fk_values.size() - 1));
+        } else {
+          inserted_value = std::to_string(
+              fk_unique_keys[rand_int(fk_unique_keys.size() - 1)]);
+        }
       } else if (column->type_ == Column::COLUMN_TYPES::GENERATED) {
-        value += "DEFAULT";
+        inserted_value = "DEFAULT";
       } else if (column->primary_key) {
-        value += std::to_string(thd->unique_keys.at(records));
+        inserted_value = std::to_string(thd->unique_keys.at(records));
       } else if (column->auto_increment == true) {
-        value += "NULL";
+        inserted_value = "NULL";
       } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
         /* for list partition we insert only maximum possible value
          * todo modify rand_value to return list parititon range */
-        value += std::to_string(
+        inserted_value = std::to_string(
             rand_int(maximum_records_in_each_parititon_list *
                      options->at(Option::MAX_PARTITIONS)->getInt()));
       } else {
-        value += column->rand_value();
+        inserted_value = column->rand_value();
       }
 
+      value += inserted_value;
+      column->inserted_values.push_back(inserted_value);
       value += ", ";
     }
     value.erase(value.size() - 2);
@@ -2931,6 +3074,12 @@ void Table::InsertRandomRow(Thd1 *thd) {
   table_mutex.lock();
   std::string vals = "";
   std::string type = "INSERT";
+  std::vector<std::string> row_values;
+  auto strength_fk = options->at(Option::STRENGTH_FK)->getBool();
+  FK_table *fk_table = nullptr;
+
+  if (this->type == TABLE_TYPES::FK && strength_fk)
+    fk_table = static_cast<FK_table *>(this);
 
   type = rand_int(3) == 0 ? "INSERT" : "REPLACE";
 
@@ -2938,13 +3087,24 @@ void Table::InsertRandomRow(Thd1 *thd) {
   for (auto &column : *columns_) {
     sql += column->name_ + " ,";
     std::string val;
-    if (column->type_ == Column::COLUMN_TYPES::GENERATED)
+    if (strength_fk && this->type == TABLE_TYPES::FK &&
+        column->name_.find("fk_col") != std::string::npos) {
+      auto &candidate_values = fk_table->parent_column->inserted_values;
+      if (candidate_values.empty()) {
+        table_mutex.unlock();
+        thd->thread_log << "No cached parent FK values available for " << name_
+                        << std::endl;
+        return;
+      }
+      val = candidate_values.at(rand_int(candidate_values.size() - 1));
+    } else if (column->type_ == Column::COLUMN_TYPES::GENERATED)
       val = "default";
     else
       val = column->rand_value();
     if (column->auto_increment == true && rand_int(100) < 10)
       val = "NULL";
     vals += " " + val + ",";
+    row_values.push_back(val);
   }
 
   if (vals.size() > 0) {
@@ -2954,7 +3114,10 @@ void Table::InsertRandomRow(Thd1 *thd) {
   sql += ") VALUES(" + vals;
   sql += " )";
   table_mutex.unlock();
-  execute_sql(sql, thd);
+  if (execute_sql(sql, thd)) {
+    for (size_t i = 0; i < row_values.size(); i++)
+      columns_->at(i)->inserted_values.push_back(row_values.at(i));
+  }
 }
 
 /* set mysqld_variable */
@@ -3366,6 +3529,9 @@ static std::string load_metadata_from_file() {
       std::string parent_name = tab["parent"].GetString();
 
       table = new FK_table(name, on_update, on_delete);
+      if (tab.HasMember("parent_column"))
+        static_cast<FK_table *>(table)->parent_column_name =
+            tab["parent_column"].GetString();
       for (auto &tbl : *all_tables) {
         if (tbl->name_ == parent_name) {
             static_cast<FK_table *>(table)->parent = tbl;
@@ -3441,6 +3607,14 @@ static std::string load_metadata_from_file() {
         }
       }
       table->AddInternalIndex(index);
+    }
+
+    if (table_type == "FK") {
+      auto fk_table = static_cast<FK_table *>(table);
+      fk_table->parent_column = fk_table->find_parent_reference_column();
+      if (fk_table->parent_column != nullptr &&
+          fk_table->parent_column_name.empty())
+        fk_table->parent_column_name = fk_table->parent_column->name_;
     }
 
     all_tables->push_back(table);

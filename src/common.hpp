@@ -144,6 +144,7 @@ struct Option {
     NO_TEMPORARY,
     NO_PARTITION,
     NO_FK,
+    STRENGTH_FK,
     FK_PROB,
     PARTITION_PROB,
     TEMPORARY_PROB,

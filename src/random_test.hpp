@@ -96,6 +96,7 @@ public:
   bool auto_increment = false;
   bool compressed = false; // percona type compressed
   std::vector<int> unique_values;
+  std::vector<std::string> inserted_values;
   Table *table_;
 };
 
@@ -221,6 +222,7 @@ struct Table {
   void IndexRename(Thd1 *thd);
   template <typename Writer> void Serialize(Writer &writer) const;
   virtual ~Table();
+  bool has_index_on_column(const Column *column) const;
 
   std::string name_;
   std::string engine;
@@ -279,7 +281,14 @@ struct FK_table : Table {
   /* current only used for step 1. So we do not store in metadata.
    Used to get distince keys of pkey table */
   Table* parent;
+  Column *parent_column = nullptr;
+  std::string parent_column_name;
+  std::vector<std::string> fk_values;
   bool load_fk_constraint(Thd1 *thd);
+  bool configure_reference_column();
+  Column *child_fk_column() const;
+  Column *find_parent_reference_column() const;
+  bool can_use_column_for_strength_fk(const Column *column) const;
 
   void pickRefrence(Table *table) {
     on_delete = getRandomForeignKeyAction(table);

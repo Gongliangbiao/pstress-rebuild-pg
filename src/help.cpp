@@ -235,6 +235,16 @@ void add_options() {
   opt->setArgs(no_argument);
   opt->setBool(false);
 
+  opt = newOption(Option::BOOL, Option::STRENGTH_FK, "strength-fk");
+  opt->help = R"(
+    Allow FK tables to reference any indexed parent column with a compatible type.
+    When enabled, pstress no longer requires the parent column to be a primary key,
+    and initial FK values are taken from the parent table's inserted values cache.
+    The first version supports INT, INTEGER, CHAR, and VARCHAR indexed parent columns.
+  )";
+  opt->setArgs(no_argument);
+  opt->setBool(false);
+
   /* No Partition tables */
   opt = newOption(Option::BOOL, Option::NO_PARTITION, "no-partition-tables");
   opt->help = "do not work on partition tables";
@@ -251,7 +261,8 @@ void add_options() {
   opt->help = R"(
     Probability of each normal table having the FK. Currently, FKs are only linked
     to the primary key of the parent table. So, even with 100% probability, a table
-    will have an FK only if its parent has a primary key.
+    will have an FK only if its parent has a primary key. Use --strength-fk to allow
+    indexed INT/INTEGER/CHAR/VARCHAR parent columns as FK targets.
   )";
   opt->setInt(50);
 
