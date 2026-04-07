@@ -140,6 +140,7 @@ Option | Function | Example | Default
 --socket | Socket file to use | | default: /tmp/socket.sock
 --sof | server options file, MySQL server options file, picks some of the mysqld options, and try to set them during the load , using set global and set session | --sof=innodb_temp_tablespace_encrypt=on=off | default:
 --step | current step in pstress script | | default#: 1
+--strength-fk | Enable stronger FK generation that can reference indexed parent columns instead of only integer primary keys | | default: 0
 --tables | Number of initial tables | --tables=10 | default#: 10
 --tbs-count | random number of different general tablespaces | --tbs-count=3 | default#: 1
 --test-connection | Test connection to server and exit | | default: 0
@@ -171,6 +172,86 @@ cd pstress/pstress
 nohup ./pstress-run.sh pstress-run.conf 2>&1 &
 ```
 Check run logs through tail -f nohup.out
+
+# `strength-fk` enhancement notes
+
+This fork adds an opt-in FK mode controlled by `--strength-fk`.
+
+## What changed
+
+- Default behavior is unchanged. Without `--strength-fk`, pstress still creates FK tables only from parent primary keys and keeps the old integer FK path.
+- With `--strength-fk`, FK child tables can reference indexed parent columns instead of being limited to integer primary keys.
+- The first supported referenced parent types are `INT`, `INTEGER`, `CHAR`, and `VARCHAR`.
+- FK child columns are rebuilt to match the selected parent column type.
+- FK metadata now stores the referenced parent column name so step reload can recover the FK target correctly.
+
+## Why this was needed
+
+The original FK implementation was hard-coded around an integer parent primary key:
+
+- parent table must have a primary key
+- FK always points to that primary key
+- child FK column uses the legacy integer layout
+- preload values come from the integer-only `unique_keys` path
+
+That design breaks as soon as the referenced parent column is not an integer primary key.
+
+## Runtime pitfalls found during implementation
+
+Two runtime issues showed up when `--strength-fk` was exercised under concurrent random workload:
+
+1. FK metadata could become invalid after random DDL changed or recreated FK tables or their parent tables.
+2. Per-column inserted-value caches were shared across threads without synchronization, which could corrupt heap state under concurrent inserts.
+
+The current implementation addresses both:
+
+- FK tables and their referenced parent tables are treated as protected tables while `--strength-fk` is enabled, so destructive schema-changing DDL is skipped for them.
+- Parent FK values are resolved by stored column name instead of trusting a stale raw pointer.
+- Inserted-value caches are read and written under a dedicated mutex, and FK readers use snapshot copies of parent cached values.
+
+## Current scope limits
+
+The first version intentionally keeps the supported parent reference targets narrow:
+
+- supported: `INT`, `INTEGER`, `CHAR`, `VARCHAR`
+- not supported: `BLOB`, `GENERATED`, `FLOAT`, `DOUBLE`, `BOOL`
+
+Also note:
+
+- for indexed columns, the implementation currently requires the referenced parent column to be the first column of an index
+- `AUTO_INCREMENT` parent columns are excluded from `--strength-fk`
+
+## Suggested verification command
+
+```bash
+./build/src/pstress-ms \
+  --database=pstress_fk_test \
+  --threads=10 \
+  --seconds=600 \
+  --logdir=/tmp/pstress-strength-fk-run \
+  --user=root \
+  --password=12345678 \
+  --socket=/tmp/mysql.sock \
+  --engine=INNODB \
+  --tables=20 \
+  --records=1000 \
+  --exact-initial-records \
+  --columns=8 \
+  --indexes=4 \
+  --index-columns=2 \
+  --fk-prob=100 \
+  --pk-prob=0 \
+  --undo-tbs-sql=0 \
+  --no-partition-tables \
+  --no-temp-tables \
+  --no-tbs \
+  --no-encryption \
+  --no-table-compression \
+  --strength-fk \
+  --log-failed-queries
+```
+
+For more implementation detail, see `doc/strength-fk.md`.
 
 
 # Contributors
