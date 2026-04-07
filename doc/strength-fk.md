@@ -67,3 +67,21 @@ The current cache tracks inserted parent values well enough for preload and late
 but it does not try to stay perfectly synchronized with every later random update, delete, or
 truncate. That can still produce legitimate FK failures during later workload execution if the
 parent rows are changed after the cache was populated.
+
+## Runtime Stability Guard
+
+The first broad random workload uncovered a crash path when `--strength-fk` tables were allowed
+to participate in schema-changing DDL during runtime. The fix in this branch adds two guardrails:
+
+- FK tables and their referenced parent tables are treated as `strength-fk` protected tables
+- schema-changing operations that can invalidate FK metadata are skipped for those tables:
+  - `DROP/CREATE`
+  - `ADD/DROP COLUMN`
+  - `ADD/DROP INDEX`
+  - `MODIFY COLUMN`
+  - `RENAME COLUMN`
+  - `RENAME INDEX`
+  - `DISCARD TABLESPACE`
+
+In addition, FK parent-column lookups now re-resolve by stored column name instead of trusting a
+cached raw pointer after unrelated runtime activity.

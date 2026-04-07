@@ -223,6 +223,7 @@ struct Table {
   template <typename Writer> void Serialize(Writer &writer) const;
   virtual ~Table();
   bool has_index_on_column(const Column *column) const;
+  bool is_strength_fk_protected() const;
 
   std::string name_;
   std::string engine;

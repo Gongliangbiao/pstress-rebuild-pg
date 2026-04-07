@@ -1198,6 +1198,25 @@ bool Table::has_index_on_column(const Column *column) const {
   return false;
 }
 
+bool Table::is_strength_fk_protected() const {
+  if (!options->at(Option::STRENGTH_FK)->getBool())
+    return false;
+
+  if (type == FK)
+    return true;
+
+  for (const auto &table : *all_tables) {
+    if (table->type != FK)
+      continue;
+
+    auto fk_table = static_cast<FK_table *>(table);
+    if (fk_table->parent == this)
+      return true;
+  }
+
+  return false;
+}
+
 Column *FK_table::child_fk_column() const {
   for (const auto &column : *columns_) {
     if (column->name_.find("fk_col") != std::string::npos)
@@ -1231,6 +1250,7 @@ Column *FK_table::find_parent_reference_column() const {
       if (column->name_ == parent_column_name)
         return column;
     }
+    return nullptr;
   }
 
   if (!options->at(Option::STRENGTH_FK)->getBool()) {
@@ -1315,19 +1335,19 @@ bool FK_table::configure_reference_column() {
 }
 
 bool FK_table::load_fk_values_from_parent(Thd1 *thd) {
-  if (parent_column == nullptr)
-    parent_column = find_parent_reference_column();
-
-  if (parent_column == nullptr)
+  auto resolved_parent_column = find_parent_reference_column();
+  if (resolved_parent_column == nullptr)
     return false;
 
-  std::string select_expr = parent_column->name_;
-  if (parent_column->type_ == Column::CHAR ||
-      parent_column->type_ == Column::VARCHAR)
-    select_expr = "QUOTE(" + parent_column->name_ + ")";
+  parent_column = resolved_parent_column;
+
+  std::string select_expr = resolved_parent_column->name_;
+  if (resolved_parent_column->type_ == Column::CHAR ||
+      resolved_parent_column->type_ == Column::VARCHAR)
+    select_expr = "QUOTE(" + resolved_parent_column->name_ + ")";
 
   std::string sql = "SELECT DISTINCT " + select_expr + " FROM " + parent->name_ +
-                    " WHERE " + parent_column->name_ + " IS NOT NULL";
+                    " WHERE " + resolved_parent_column->name_ + " IS NOT NULL";
 
   if (!execute_sql(sql, thd))
     return false;
@@ -1341,7 +1361,7 @@ bool FK_table::load_fk_values_from_parent(Thd1 *thd) {
   if (values.empty())
     return false;
 
-  parent_column->inserted_values = values;
+  resolved_parent_column->inserted_values = values;
   fk_values = values;
   return true;
 }
@@ -1349,16 +1369,17 @@ bool FK_table::load_fk_values_from_parent(Thd1 *thd) {
 bool FK_table::load_fk_constraint(Thd1 *thd) {
 
   std::string constraint = name_ + "_" + parent->name_;
-  if (parent_column == nullptr)
-    parent_column = find_parent_reference_column();
+  auto resolved_parent_column = find_parent_reference_column();
+  if (resolved_parent_column != nullptr)
+    parent_column = resolved_parent_column;
 
   auto fk_column = child_fk_column();
-  assert(parent_column != nullptr);
+  assert(resolved_parent_column != nullptr);
   assert(fk_column != nullptr);
 
   std::string sql = "ALTER TABLE " + name_ + " ADD CONSTRAINT " + constraint +
                     " FOREIGN KEY (" + fk_column->name_ + ") REFERENCES " +
-                    parent->name_ + " (" + parent_column->name_ + ")";
+                    parent->name_ + " (" + resolved_parent_column->name_ + ")";
   sql += " ON UPDATE " + enumToString(on_update);
   sql += " ON DELETE  " + enumToString(on_delete);
 
@@ -1430,6 +1451,11 @@ Partition::Partition(std::string n) : Table(n) {
 }
 
 void Table::DropCreate(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping DROP/CREATE for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   execute_sql("DROP TABLE " + name_, thd);
   std::string def = definition();
   if (!execute_sql(def, thd) && tablespace.size() > 0) {
@@ -2317,6 +2343,11 @@ void Table::SetAlterEngine(Thd1 *thd) {
 
 // todo pick relevent table//
 void Table::ModifyColumn(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping MODIFY COLUMN for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   std::string sql = "ALTER TABLE " + name_ + " MODIFY COLUMN ";
   Column *col = nullptr;
   /* store old value */
@@ -2383,6 +2414,11 @@ void Table::ModifyColumn(Thd1 *thd) {
 
 /* alter table drop column */
 void Table::DropColumn(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping DROP COLUMN for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   table_mutex.lock();
 
   /* do not drop last column */
@@ -2451,6 +2487,11 @@ void Table::DropColumn(Thd1 *thd) {
 
 /* alter table add random column */
 void Table::AddColumn(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping ADD COLUMN for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
 
   static auto no_use_virtual = opt_bool(NO_VIRTUAL_COLUMNS);
   static auto use_blob = !options->at(Option::NO_BLOB)->getBool();
@@ -2549,6 +2590,11 @@ void Table::AddColumn(Thd1 *thd) {
 
 /* randomly drop some index of table */
 void Table::DropIndex(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping DROP INDEX for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   table_mutex.lock();
   if (indexes_ != nullptr && indexes_->size() > 0) {
     auto index = indexes_->at(rand_int(indexes_->size() - 1));
@@ -2577,6 +2623,11 @@ void Table::DropIndex(Thd1 *thd) {
 
 /*randomly add some index on the table */
 void Table::AddIndex(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping ADD INDEX for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   auto i = rand_int(1000);
   Index *id = new Index(name_ + std::to_string(i));
 
@@ -2707,6 +2758,11 @@ void Table::SelectAllRow(Thd1 *thd) {
 }
 
 void Table::IndexRename(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping RENAME INDEX for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   table_mutex.lock();
   if (indexes_->size() == 0)
     table_mutex.unlock();
@@ -2737,6 +2793,11 @@ void Table::IndexRename(Thd1 *thd) {
 }
 
 void Table::ColumnRename(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping RENAME COLUMN for strength-fk protected table "
+                    << name_ << std::endl;
+    return;
+  }
   table_mutex.lock();
   auto ps = rand_int(columns_->size() - 1);
   auto name = columns_->at(ps)->name_;
@@ -3027,7 +3088,15 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   if (type == TABLE_TYPES::FK) {
     auto fk_table = static_cast<FK_table *>(this);
     if (strength_fk) {
-      fk_values = fk_table->parent_column->inserted_values;
+      auto resolved_parent_column = fk_table->find_parent_reference_column();
+      if (resolved_parent_column == nullptr) {
+        thd->thread_log << "Unable to resolve parent FK column for " << name_
+                        << std::endl;
+        run_query_failed = true;
+        return false;
+      }
+      fk_table->parent_column = resolved_parent_column;
+      fk_values = resolved_parent_column->inserted_values;
       if (fk_values.empty() && !fk_table->load_fk_values_from_parent(thd)) {
         thd->thread_log << "No cached parent FK values available for " << name_
                         << std::endl;
@@ -3145,7 +3214,15 @@ void Table::InsertRandomRow(Thd1 *thd) {
     std::string val;
     if (strength_fk && this->type == TABLE_TYPES::FK &&
         column->name_.find("fk_col") != std::string::npos) {
-      auto &candidate_values = fk_table->parent_column->inserted_values;
+      auto resolved_parent_column = fk_table->find_parent_reference_column();
+      if (resolved_parent_column == nullptr) {
+        table_mutex.unlock();
+        thd->thread_log << "Unable to resolve parent FK column for " << name_
+                        << std::endl;
+        return;
+      }
+      fk_table->parent_column = resolved_parent_column;
+      auto &candidate_values = resolved_parent_column->inserted_values;
       if (candidate_values.empty())
         fk_table->load_fk_values_from_parent(thd);
       if (candidate_values.empty()) {
@@ -3212,6 +3289,11 @@ void alter_tablespace_encryption(Thd1 *thd) {
 
 /* alter table discard tablespace */
 void Table::alter_discard_tablespace(Thd1 *thd) {
+  if (is_strength_fk_protected()) {
+    thd->thread_log << "Skipping DISCARD TABLESPACE for strength-fk protected "
+                    << "table " << name_ << std::endl;
+    return;
+  }
   std::string sql = "ALTER TABLE " + name_ + " DISCARD TABLESPACE";
   execute_sql(sql, thd);
   /* Discarding the tablespace makes the table unusable, hence recreate the
