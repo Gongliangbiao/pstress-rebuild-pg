@@ -85,3 +85,16 @@ to participate in schema-changing DDL during runtime. The fix in this branch add
 
 In addition, FK parent-column lookups now re-resolve by stored column name instead of trusting a
 cached raw pointer after unrelated runtime activity.
+
+## Concurrent Cache Fix
+
+The broad `--strength-fk` workload also exposed a heap-corruption bug caused by concurrent access
+to per-column `inserted_values` caches. Those caches are shared across worker threads and are now
+updated and read under a dedicated mutex.
+
+As part of that fix:
+
+- FK readers take a snapshot copy of parent inserted values instead of reading a shared vector
+  without synchronization
+- writers append and reset inserted-value caches through locked helper methods
+- the temporary `fk_values` cross-thread fallback is no longer used as a shared mutable cache

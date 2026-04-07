@@ -1361,8 +1361,7 @@ bool FK_table::load_fk_values_from_parent(Thd1 *thd) {
   if (values.empty())
     return false;
 
-  resolved_parent_column->inserted_values = values;
-  fk_values = values;
+  resolved_parent_column->set_inserted_values(values);
   return true;
 }
 
@@ -3096,7 +3095,7 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
         return false;
       }
       fk_table->parent_column = resolved_parent_column;
-      fk_values = resolved_parent_column->inserted_values;
+      fk_values = resolved_parent_column->get_inserted_values();
       if (fk_values.empty() && !fk_table->load_fk_values_from_parent(thd)) {
         thd->thread_log << "No cached parent FK values available for " << name_
                         << std::endl;
@@ -3104,8 +3103,7 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
         return false;
       }
       if (fk_values.empty())
-        fk_values = fk_table->fk_values;
-      fk_table->fk_values = fk_values;
+        fk_values = resolved_parent_column->get_inserted_values();
     } else {
       fk_unique_keys = std::move(thd->unique_keys);
     }
@@ -3115,7 +3113,7 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   }
 
   for (auto &column : *columns_)
-    column->inserted_values.clear();
+    column->clear_inserted_values();
 
   /* ignore error in the case parition list  */
   if (type == PARTITION &&
@@ -3171,7 +3169,7 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
       }
 
       value += inserted_value;
-      column->inserted_values.push_back(inserted_value);
+      column->append_inserted_value(inserted_value);
       value += ", ";
     }
     value.erase(value.size() - 2);
@@ -3222,9 +3220,11 @@ void Table::InsertRandomRow(Thd1 *thd) {
         return;
       }
       fk_table->parent_column = resolved_parent_column;
-      auto &candidate_values = resolved_parent_column->inserted_values;
+      auto candidate_values = resolved_parent_column->get_inserted_values();
       if (candidate_values.empty())
         fk_table->load_fk_values_from_parent(thd);
+      if (candidate_values.empty())
+        candidate_values = resolved_parent_column->get_inserted_values();
       if (candidate_values.empty()) {
         table_mutex.unlock();
         thd->thread_log << "No cached parent FK values available for " << name_
@@ -3251,7 +3251,7 @@ void Table::InsertRandomRow(Thd1 *thd) {
   table_mutex.unlock();
   if (execute_sql(sql, thd)) {
     for (size_t i = 0; i < row_values.size(); i++)
-      columns_->at(i)->inserted_values.push_back(row_values.at(i));
+      columns_->at(i)->append_inserted_value(row_values.at(i));
   }
 }
 

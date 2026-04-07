@@ -87,8 +87,25 @@ private:
 
 public:
   virtual ~Column(){};
+  void clear_inserted_values() {
+    std::lock_guard<std::mutex> lock(inserted_values_mutex);
+    inserted_values.clear();
+  }
+  void set_inserted_values(const std::vector<std::string> &values) {
+    std::lock_guard<std::mutex> lock(inserted_values_mutex);
+    inserted_values = values;
+  }
+  std::vector<std::string> get_inserted_values() const {
+    std::lock_guard<std::mutex> lock(inserted_values_mutex);
+    return inserted_values;
+  }
+  void append_inserted_value(const std::string &value) {
+    std::lock_guard<std::mutex> lock(inserted_values_mutex);
+    inserted_values.push_back(value);
+  }
   std::string name_;
   std::mutex mutex;
+  mutable std::mutex inserted_values_mutex;
   bool null = false;
   int length = 0;
   std::string default_value;
