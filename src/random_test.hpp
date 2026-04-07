@@ -289,6 +289,7 @@ struct FK_table : Table {
   Column *child_fk_column() const;
   Column *find_parent_reference_column() const;
   bool can_use_column_for_strength_fk(const Column *column) const;
+  bool load_fk_values_from_parent(Thd1 *thd);
 
   void pickRefrence(Table *table) {
     on_delete = getRandomForeignKeyAction(table);

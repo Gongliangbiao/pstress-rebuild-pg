@@ -1191,10 +1191,8 @@ bool Table::has_index_on_column(const Column *column) const {
     return true;
 
   for (const auto &index : *indexes_) {
-    for (const auto &ind_col : *index->columns_) {
-      if (ind_col->column == column)
-        return true;
-    }
+    if (!index->columns_->empty() && index->columns_->at(0)->column == column)
+      return true;
   }
 
   return false;
@@ -1272,11 +1270,35 @@ bool FK_table::configure_reference_column() {
   auto replacement =
       new Column("fk_col", this, parent_column->type_);
   replacement->length = parent_column->length;
+  auto previous_name = current_fk_column->name_;
+  auto replacement_name = replacement->name_;
+  auto replacement_expr = replacement_name;
+  if ((parent_column->type_ == Column::CHAR ||
+       parent_column->type_ == Column::VARCHAR) &&
+      parent_column->type_ != current_fk_column->type_) {
+    replacement_expr = "LENGTH(" + replacement_name + ")";
+  }
 
   for (const auto &index : *indexes_) {
     for (const auto &ind_col : *index->columns_) {
       if (ind_col->column == current_fk_column)
         ind_col->column = replacement;
+    }
+  }
+
+  for (const auto &column : *columns_) {
+    if (column->type_ != Column::GENERATED)
+      continue;
+
+    auto generated = static_cast<Generated_Column *>(column);
+    size_t pos = 0;
+    auto generated_replacement = replacement_name;
+    if (generated->g_type == Column::INT || generated->g_type == Column::INTEGER)
+      generated_replacement = replacement_expr;
+    while ((pos = generated->str.find(previous_name, pos)) !=
+           std::string::npos) {
+      generated->str.replace(pos, previous_name.length(), generated_replacement);
+      pos += generated_replacement.length();
     }
   }
 
@@ -1290,6 +1312,38 @@ bool FK_table::configure_reference_column() {
 
   delete replacement;
   return false;
+}
+
+bool FK_table::load_fk_values_from_parent(Thd1 *thd) {
+  if (parent_column == nullptr)
+    parent_column = find_parent_reference_column();
+
+  if (parent_column == nullptr)
+    return false;
+
+  std::string select_expr = parent_column->name_;
+  if (parent_column->type_ == Column::CHAR ||
+      parent_column->type_ == Column::VARCHAR)
+    select_expr = "QUOTE(" + parent_column->name_ + ")";
+
+  std::string sql = "SELECT DISTINCT " + select_expr + " FROM " + parent->name_ +
+                    " WHERE " + parent_column->name_ + " IS NOT NULL";
+
+  if (!execute_sql(sql, thd))
+    return false;
+
+  std::vector<std::string> values;
+  while (auto row = mysql_fetch_row_safe(thd)) {
+    if (row[0] != nullptr)
+      values.push_back(row[0]);
+  }
+
+  if (values.empty())
+    return false;
+
+  parent_column->inserted_values = values;
+  fk_values = values;
+  return true;
 }
 
 bool FK_table::load_fk_constraint(Thd1 *thd) {
@@ -2974,13 +3028,15 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
     auto fk_table = static_cast<FK_table *>(this);
     if (strength_fk) {
       fk_values = fk_table->parent_column->inserted_values;
-      fk_table->fk_values = fk_values;
-      if (fk_values.empty()) {
+      if (fk_values.empty() && !fk_table->load_fk_values_from_parent(thd)) {
         thd->thread_log << "No cached parent FK values available for " << name_
                         << std::endl;
         run_query_failed = true;
         return false;
       }
+      if (fk_values.empty())
+        fk_values = fk_table->fk_values;
+      fk_table->fk_values = fk_values;
     } else {
       fk_unique_keys = std::move(thd->unique_keys);
     }
@@ -3090,6 +3146,8 @@ void Table::InsertRandomRow(Thd1 *thd) {
     if (strength_fk && this->type == TABLE_TYPES::FK &&
         column->name_.find("fk_col") != std::string::npos) {
       auto &candidate_values = fk_table->parent_column->inserted_values;
+      if (candidate_values.empty())
+        fk_table->load_fk_values_from_parent(thd);
       if (candidate_values.empty()) {
         table_mutex.unlock();
         thd->thread_log << "No cached parent FK values available for " << name_
